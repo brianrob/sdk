@@ -96,65 +96,7 @@ namespace Microsoft.NET.Build.Tests
                 .HaveStdOutContaining(Strings.WindowsDesktopFrameworkRequiresWindows);
         }
 
-        [RequiresMSBuildVersionFact("16.8.0")]
-        public void It_does_not_download_desktop_targeting_packs_on_unix()
-        {
-            const string ProjectName = "NoDownloadTargetingPackTest";
-
-            var testProject = new TestProject()
-            {
-                Name = ProjectName,
-                TargetFrameworks = "net5.0",
-                IsSdkProject = true,
-                IsExe = true,
-            };
-
-            testProject.AdditionalProperties["RestorePackagesPath"] = @"$(MSBuildProjectDirectory)\packages";
-
-            var asset = _testAssetsManager.CreateTestProject(testProject);
-
-            var command = new BuildCommand(asset);
-
-            command
-                .Execute()
-                .Should()
-                .Pass();
-
-            Directory.Exists(Path.Combine(asset.Path, ProjectName, "packages")).Should().BeFalse();
-        }
-
-        [PlatformSpecificFact(TestPlatforms.Linux | TestPlatforms.OSX | TestPlatforms.FreeBSD)]
-        public void It_does_not_download_desktop_runtime_packs_on_unix()
-        {
-            const string ProjectName = "NoDownloadRuntimePackTest";
-            const string Rid = "win-x64";
-
-            var testProject = new TestProject()
-            {
-                Name = ProjectName,
-                TargetFrameworks = "netcoreapp3.0",
-                IsSdkProject = true,
-                IsExe = true,
-                RuntimeIdentifier = Rid
-            };
-
-            testProject.AdditionalProperties["RestorePackagesPath"] = @"$(MSBuildProjectDirectory)\packages";
-
-            var asset = _testAssetsManager.CreateTestProject(testProject);
-
-            var command = new PublishCommand(Log, Path.Combine(asset.Path, ProjectName));
-
-            command
-                .Execute()
-                .Should()
-                .Pass();
-
-            new DirectoryInfo(Path.Combine(asset.Path, ProjectName, "packages"))
-                .Should()
-                .NotHaveSubDirectories($"runtime.{Rid}.microsoft.windowsdesktop.app");
-        }
-
-        [RequiresMSBuildVersionTheory("16.8.0")]
+        [WindowsOnlyTheory]
         [InlineData("net5.0", "TargetPlatformIdentifier", "Windows", "Exe")]
         [InlineData("netcoreapp3.1", "UseWindowsForms", "true", "WinExe")]
         [InlineData("netcoreapp3.1", "UseWPF", "true", "WinExe")]
@@ -188,7 +130,7 @@ namespace Microsoft.NET.Build.Tests
         {
             const string ProjectName = "WindowsDesktopSdkTest_50";
 
-            const string tfm = "net5.0";
+            const string tfm = "net5.0-windows";
 
             var testProject = new TestProject()
             {
@@ -286,6 +228,43 @@ namespace Microsoft.NET.Build.Tests
                 .Pass();
 
             Assert(publishCommand.GetOutputDirectory(tfm, runtimeIdentifier: runtimeIdentifier));
+
+            var command = new GetValuesCommand(
+                Log,
+                Path.Combine(asset.Path, testProject.Name),
+                testProject.TargetFrameworks,
+                "FilesCopiedToPublishDir",
+                GetValuesCommand.ValueType.Item)
+            {
+                DependsOnTargets = "ComputeFilesCopiedToPublishDir",
+                MetadataNames = { "RelativePath" },
+            };
+
+            command.Execute().Should().Pass();
+            var items = from item in command.GetValuesWithMetadata()
+                        select new
+                        {
+                            Identity = item.value,
+                            RelativePath = item.metadata["RelativePath"]
+                        };
+
+            items
+                .Should().Contain(i => i.RelativePath == "Microsoft.Windows.SDK.NET.dll" && Path.GetFileName(i.Identity) == "Microsoft.Windows.SDK.NET.dll",
+                                  because: "wapproj should copy cswinrt dlls");
+            items
+                .Should()
+                .Contain(i => i.RelativePath == "WinRT.Runtime.dll" && Path.GetFileName(i.Identity) == "WinRT.Runtime.dll",
+                         because: "wapproj should copy cswinrt dlls");
+
+            // ready to run is supported
+            publishCommand.Execute("-p:SelfContained=true", $"-p:RuntimeIdentifier={runtimeIdentifier}", $"-p:PublishReadyToRun=true")
+                .Should()
+                .Pass();
+
+            // PublishSingleFile is supported
+            publishCommand.Execute("-p:SelfContained=true", $"-p:RuntimeIdentifier={runtimeIdentifier}", $"-p:PublishSingleFile=true")
+                .Should()
+                .Pass();
         }
 
         private TestAsset CreateWindowsDesktopSdkTestAsset(string projectName, string uiFrameworkProperty)

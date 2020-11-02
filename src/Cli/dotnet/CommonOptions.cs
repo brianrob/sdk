@@ -1,3 +1,6 @@
+// Copyright (c) .NET Foundation and contributors. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 using System;
 using System.IO;
 using System.Linq;
@@ -16,6 +19,9 @@ namespace Microsoft.DotNet.Cli
                 Accept.NoArguments());
 
         public static Option VerbosityOption() =>
+            VerbosityOption(o => $"-verbosity:{o.Arguments.Single()}");
+
+        public static Option VerbosityOption(Func<AppliedOption, string> format) =>
             Create.Option(
                 "-v|--verbosity",
                 CommonLocalizableStrings.VerbosityOptionDescription,
@@ -26,8 +32,8 @@ namespace Microsoft.DotNet.Cli
                           "d", "detailed",
                           "diag", "diagnostic")
                       .With(name: CommonLocalizableStrings.LevelArgumentName)
-                      .ForwardAsSingle(o => $"-verbosity:{o.Arguments.Single()}"));
-        
+                      .ForwardAsSingle(format));
+
         public static Option FrameworkOption(string description) =>
             Create.Option(
                 "-f|--framework",
@@ -36,7 +42,7 @@ namespace Microsoft.DotNet.Cli
                     .WithSuggestionsFrom(_ => Suggest.TargetFrameworksFromProjectFile())
                     .With(name: CommonLocalizableStrings.FrameworkArgumentName)
                     .ForwardAsSingle(o => $"-property:TargetFramework={o.Arguments.Single()}"));
-        
+
         public static Option RuntimeOption(string description, bool withShortOption = true) =>
             Create.Option(
                 withShortOption ? "-r|--runtime" : "--runtime",
@@ -45,7 +51,14 @@ namespace Microsoft.DotNet.Cli
                     .WithSuggestionsFrom(_ => Suggest.RunTimesFromProjectFile())
                     .With(name: CommonLocalizableStrings.RuntimeIdentifierArgumentName)
                     .ForwardAsSingle(o => $"-property:RuntimeIdentifier={o.Arguments.Single()}"));
-                
+
+        public static Option CurrentRuntimeOption(string description, bool withShortOption = true) =>
+            Create.Option(
+                "--use-current-runtime",
+                description,
+                Accept.NoArguments()
+                    .ForwardAs("-property:UseCurrentRuntimeIdentifier=True"));
+
         public static Option ConfigurationOption(string description) =>
             Create.Option(
                 "-c|--configuration",

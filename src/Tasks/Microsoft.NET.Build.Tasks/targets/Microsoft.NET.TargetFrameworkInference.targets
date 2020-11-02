@@ -58,10 +58,11 @@ Copyright (c) .NET Foundation. All rights reserved.
   <!--
     Parse TargetPlatform properties.
   -->
-  <PropertyGroup Condition="'$(TargetFramework)' != '' and ('$(TargetPlatformIdentifier)' == '' and '$(TargetPlatformVersion)' == '')">
-    <TargetPlatformIdentifier>$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</TargetPlatformIdentifier>
-    <TargetPlatformVersion>$([MSBuild]::GetTargetPlatformVersion('$(TargetFramework)', 2))</TargetPlatformVersion>
-    <TargetPlatformVersion Condition="'$(TargetPlatformVersion)' == '0.0'" ></TargetPlatformVersion>
+  <PropertyGroup Condition="'$(TargetFramework)' != '' and ('$(TargetPlatformIdentifier)' == '' or '$(TargetPlatformVersion)' == '')">
+    <TargetPlatformIdentifier Condition="'$(TargetPlatformIdentifier)' == ''">$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</TargetPlatformIdentifier>
+    <TargetPlatformVersion Condition="'$(TargetPlatformIdentifier)' == 'Windows'" >$([MSBuild]::GetTargetPlatformVersion('$(TargetFramework)', 4))</TargetPlatformVersion>
+    <TargetPlatformVersion Condition="'$(TargetPlatformVersion)' == '' or ('$(TargetPlatformIdentifier)' == 'Windows' and !$([MSBuild]::VersionGreaterThanOrEquals($(TargetPlatformVersion), 10.0)))" >$([MSBuild]::GetTargetPlatformVersion('$(TargetFramework)', 2))</TargetPlatformVersion>
+    <TargetPlatformVersion Condition="$([MSBuild]::VersionEquals($(TargetPlatformVersion), 0.0))" ></TargetPlatformVersion> 
     <!-- Normalize casing of windows to Windows -->
     <TargetPlatformIdentifier Condition="'$(TargetPlatformIdentifier)' == 'Windows'">Windows</TargetPlatformIdentifier>
   </PropertyGroup>
@@ -76,11 +77,6 @@ Copyright (c) .NET Foundation. All rights reserved.
     <_UnsupportedTargetFrameworkError>true</_UnsupportedTargetFrameworkError>
   </PropertyGroup>
 
-  <!--Default MinimumOSPlatform to TargetPlatformVersion-->
-  <PropertyGroup Condition="'$(MinimumOSPlatform)' == '' and '$(TargetPlatformVersion)' != ''">
-    <MinimumOSPlatform>$(TargetPlatformVersion)</MinimumOSPlatform>
-  </PropertyGroup>
-
   <!--
     NOTE: We must not validate the TFM before restore target runs as it prevents adding additional TFM 
           support from being provided by a nuget package such as MSBuild.Sdk.Extras.
@@ -90,7 +86,7 @@ Copyright (c) .NET Foundation. All rights reserved.
           errors that are only consequences of the root cause identified here.
   -->
   <Target Name="_CheckForUnsupportedTargetFramework"
-          BeforeTargets="_CheckForInvalidConfigurationAndPlatform;RunResolvePackageDependencies;GetFrameworkPaths;GetReferenceAssemblyPaths"
+          BeforeTargets="_CheckForInvalidConfigurationAndPlatform;RunResolvePackageDependencies;GetFrameworkPaths;GetReferenceAssemblyPaths;Restore"
           Condition="'$(_UnsupportedTargetFrameworkError)' == 'true'"
           >
     <NETSdkError Condition="!$(TargetFramework.Contains(';'))"
@@ -157,14 +153,10 @@ Copyright (c) .NET Foundation. All rights reserved.
       />
   </Target>
 
-  <PropertyGroup  Condition="'$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0))">
+  <!--C++/CLI has its own logic of determine TargetPlatformIdentifier and TargetPlatformVersion-->
+  <PropertyGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0)) and '$(Language)' != 'C++'">
     <_EnableDefaultWindowsPlatform>false</_EnableDefaultWindowsPlatform>
     <UseOSWinMdReferences>false</UseOSWinMdReferences>
-  </PropertyGroup>
-
-  <!-- https://github.com/dotnet/sdk/issues/12492 -->
-  <PropertyGroup Condition="'$(TargetPlatformIdentifier)' == '' and ('$(UseWPF)' == 'true' or '$(UseWindowsForms)' == 'true')">
-    <TargetPlatformIdentifier>Windows</TargetPlatformIdentifier>
   </PropertyGroup>
     
   <PropertyGroup  Condition="'$(TargetFrameworkIdentifier)' == '.NETStandard' And '$(NETStandardMaximumVersion)' == ''">
@@ -187,18 +179,20 @@ Copyright (c) .NET Foundation. All rights reserved.
                  ResourceName="NETFrameworkWithoutUsingNETSdkDefaults" />
   </Target>
 
-  <Target Name="_CheckForMinimumOSPlatformHigherThanTargetPlatformVersion" BeforeTargets="_CheckForInvalidConfigurationAndPlatform" >
+  <Target Name="_CheckForSupportedOSPlatformVersionHigherThanTargetPlatformVersion" BeforeTargets="_CheckForInvalidConfigurationAndPlatform"
+          Condition="'$(TargetPlatformVersion)' != '' and '$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0))">
 
-    <NETSdkError Condition="'$(MinimumOSPlatform)' != '' and $(TargetPlatformVersion) != '' and $([MSBuild]::VersionGreaterThan($(MinimumOSPlatform), $(TargetPlatformVersion)))"
-                 ResourceName="CannotHaveMinimumOSPlatformHigherThanTargetPlatformVersion"
-                 FormatArguments="$(MinimumOSPlatform);$(TargetPlatformVersion)"/>
+    <NETSdkError Condition="'$(SupportedOSPlatformVersion)' != '' and $(TargetPlatformVersion) != '' and $([MSBuild]::VersionGreaterThan($(SupportedOSPlatformVersion), $(TargetPlatformVersion)))"
+                 ResourceName="CannotHaveSupportedOSPlatformVersionHigherThanTargetPlatformVersion"
+                 FormatArguments="$(SupportedOSPlatformVersion);$(TargetPlatformVersion)"/>
   </Target>
 
+  <!--C++/CLI targets rely on the patch version of the Windows SDK version as TargetPlatformVersion. Skip the normalization.-->
   <Target Name="_NormalizeTargetPlatformVersion"
     BeforeTargets="ProcessFrameworkReferences"
-    Condition="'$(TargetPlatformVersion)' != '' and '$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0))">
+    Condition="'$(TargetPlatformVersion)' != '' and '$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0)) and '$(Language)' != 'C++'">
     <ItemGroup>
-      <_ValidTargetPlatformVersion Include="@(SupportedTargetPlatform)" Condition="'@(SupportedTargetPlatform)' != '' and $([MSBuild]::VersionEquals(%(Identity), $(TargetPlatformVersion)))" />
+      <_ValidTargetPlatformVersion Include="@(SdkSupportedTargetPlatformVersion)" Condition="'@(SdkSupportedTargetPlatformVersion)' != '' and $([MSBuild]::VersionEquals(%(Identity), $(TargetPlatformVersion)))" />
     </ItemGroup>
 
     <PropertyGroup>
@@ -209,11 +203,11 @@ Copyright (c) .NET Foundation. All rights reserved.
   <Target Name="_CheckForInvalidTargetPlatformVersion"
       BeforeTargets="_CheckForInvalidConfigurationAndPlatform"
       DependsOnTargets="_NormalizeTargetPlatformVersion"
-      Condition="'$(TargetPlatformVersion)' != '' and '$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0))">
+      Condition="'$(TargetPlatformVersion)' != '' and '$(TargetFrameworkIdentifier)' == '.NETCoreApp' and $([MSBuild]::VersionGreaterThanOrEquals($(TargetFrameworkVersion), 5.0)) and '$(Language)' != 'C++'">
     <PropertyGroup>
       <TargetPlatformVersionSupported Condition="'$(TargetPlatformVersionSupported)' == '' and '@(_ValidTargetPlatformVersion)' != ''" >true</TargetPlatformVersionSupported>
-      <_ValidTargetPlatformVersions Condition="'@(SupportedTargetPlatform)' != ''" >@(SupportedTargetPlatform, '%0a')</_ValidTargetPlatformVersions>
-      <_ValidTargetPlatformVersions Condition="'@(SupportedTargetPlatform)' == ''" >None</_ValidTargetPlatformVersions>
+      <_ValidTargetPlatformVersions Condition="'@(SdkSupportedTargetPlatformVersion)' != ''" >@(SdkSupportedTargetPlatformVersion, '%0a')</_ValidTargetPlatformVersions>
+      <_ValidTargetPlatformVersions Condition="'@(SdkSupportedTargetPlatformVersion)' == ''" >None</_ValidTargetPlatformVersions>
     </PropertyGroup>
 
     <NetSdkError Condition="'$(TargetPlatformVersionSupported)' != 'true'"

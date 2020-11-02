@@ -27,7 +27,6 @@ namespace Microsoft.DotNet.Tools.Test
         public static TestCommand FromArgs(string[] args, string[] settings, string msbuildPath = null)
         {
             var parser = Parser.Instance;
-
             var result = parser.ParseFrom("dotnet test", args);
 
             UpdateRunSettingsArgumentsText();
@@ -74,10 +73,15 @@ namespace Microsoft.DotNet.Tools.Test
                 noRestore,
                 msbuildPath);
 
-            var rootVariableName = Environment.Is64BitProcess ? "DOTNET_ROOT" : "DOTNET_ROOT(x86)";
-            if (Environment.GetEnvironmentVariable(rootVariableName) == null)
+            // Apply environment variables provided by the user via --environment (-e) parameter, if present
+            SetEnvironmentVariablesFromParameters(testCommand, parsedTest.AppliedOptions);
+
+            // Set DOTNET_PATH if it isn't already set in the environment as it is required
+            // by the testhost which uses the apphost feature (Windows only).
+            (bool hasRootVariable, string rootVariableName, string rootValue) = VSTestForwardingApp.GetRootVariable();
+            if (!hasRootVariable)
             {
-                testCommand.EnvironmentVariable(rootVariableName, Path.GetDirectoryName(new Muxer().MuxerPath));
+                testCommand.EnvironmentVariable(rootVariableName, rootValue);
             }
 
             return testCommand;
@@ -127,7 +131,7 @@ namespace Microsoft.DotNet.Tools.Test
         private static bool ContainsBuiltTestSources(string[] args)
         {
             foreach (var arg in args)
-            {               
+            {
                 if (!arg.StartsWith("-") &&
                     (arg.EndsWith("dll", StringComparison.OrdinalIgnoreCase) || arg.EndsWith("exe", StringComparison.OrdinalIgnoreCase)))
                 {
@@ -164,6 +168,31 @@ namespace Microsoft.DotNet.Tools.Test
         {
             DefaultHelpViewText.Synopsis.AdditionalArguments = " [[--] <RunSettings arguments>...]]";
             DefaultHelpViewText.AdditionalArgumentsSection = LocalizableStrings.RunSettingsArgumentsDescription;
+        }
+
+        private static void SetEnvironmentVariablesFromParameters(TestCommand testCommand, AppliedOptionSet optionSet)
+        {
+            const string optionName = "environment";
+
+            if (!optionSet.Contains(optionName))
+            {
+                return;
+            }
+
+            foreach (var env in optionSet[optionName].Arguments)
+            {
+                var name = env;
+                var value = string.Empty;
+
+                var equalsIndex = env.IndexOf('=');
+                if (equalsIndex > 0)
+                {
+                    name = env.Substring(0, equalsIndex);
+                    value = env.Substring(equalsIndex + 1);
+                }
+
+                testCommand.EnvironmentVariable(name, value);
+            }
         }
     }
 }

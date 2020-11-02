@@ -5,7 +5,6 @@
 # the repo. Unless a later match takes precedence,
 # @dotnet/dotnet-cli  will be requested for
 # review when someone opens a pull request.
-*       @dotnet/dotnet-cli
 
 /src/WebSdk/ @vijayrkn
 /src/Tests/Microsoft.NET.Sdk.Publish.Tasks.Tests/ @vijayrkn
@@ -25,3 +24,12 @@
 
 /src/Cli/dotnet/commands/dotnet-new @DonJoseLuis
 /src/Tests/dotnet-new.Tests @DonJoseLuis
+
+# ILLink and ReadyToRun targets and tasks owned by runtime team
+/src/Tasks/Microsoft.NET.Build.Tasks/targets/Microsoft.NET.ILLink.targets clrappmodel@microsoft.com
+/src/Tasks/Microsoft.NET.Build.Tasks/PrepareForReadyToRunCompilation.cs @AntonLapounov
+/src/Tasks/Microsoft.NET.Build.Tasks/RunReadyToRunCompiler.cs @AntonLapounov
+/src/Tests/Microsoft.NET.Publish.Tests/GivenThatWeWantToRunILLink.cs clrappmodel@microsoft.com
+/src/Tests/Microsoft.NET.Publish.Tests/GivenThatWeWantToPublishReadyToRun.cs @AntonLapounov
+# Publish.targets related to ILLink and ReadyToRun is own by both runtime and SDK team
+/src/Tasks/Microsoft.NET.Build.Tasks/targets/Microsoft.NET.Publish.targets clrappmodel@microsoft.com @AntonLapounov @dotnet/dotnet-cli

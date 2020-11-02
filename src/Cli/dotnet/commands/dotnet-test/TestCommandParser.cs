@@ -32,6 +32,11 @@ namespace Microsoft.DotNet.Cli
                         Accept.NoArguments()
                               .ForwardAsSingle(o => "-property:VSTestListTests=true")),
                   Create.Option(
+                        "-e|--environment",
+                        LocalizableStrings.CmdEnvironmentVariableDescription,
+                        Accept.OneOrMoreArguments()
+                              .With(name: LocalizableStrings.CmdEnvironmentVariableExpression)),
+                  Create.Option(
                         "--filter",
                         LocalizableStrings.CmdTestCaseFilterDescription,
                         Accept.ExactlyOneArgument()
@@ -141,7 +146,7 @@ namespace Microsoft.DotNet.Cli
                               })),
 
                   Create.Option(
-                        "--nologo|/nologo",
+                        "--nologo",
                         LocalizableStrings.CmdNoLogo,
                         Accept.NoArguments()
                               .ForwardAsSingle(o => "-property:VSTestNoLogo=nologo")),

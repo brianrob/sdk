@@ -2,13 +2,16 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Xml.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using FluentAssertions;
+using Microsoft.DotNet.Cli.Utils;
 using Microsoft.Extensions.DependencyModel;
 using Microsoft.NET.Build.Tasks;
 using Microsoft.NET.TestFramework;
@@ -100,6 +103,32 @@ namespace Microsoft.NET.Publish.Tests
         }
 
         [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("netcoreapp3.0", "copyused")]
+        [InlineData("net5.0", "copyused")]
+        [InlineData("net5.0", "link")]
+        public void ILLink_links_simple_app_without_analysis_warnings_and_it_runs(string targetFramework, string trimMode)
+        {
+            var projectName = "HelloWorld";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectForILLinkTesting(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", "/p:SelfContained=true", "/p:PublishTrimmed=true", $"/p:TrimMode={trimMode}")
+                .Should().Pass()
+                .And.NotHaveStdOutContaining("warning IL2075")
+                .And.NotHaveStdOutContaining("warning IL2026");
+
+            var publishDirectory = publishCommand.GetOutputDirectory(targetFramework: targetFramework, runtimeIdentifier: rid);
+            var exe = Path.Combine(publishDirectory.FullName, $"{testProject.Name}{Constants.ExeSuffix}");
+
+            var command = new RunExeCommand(Log, exe)
+                .Execute().Should().Pass()
+                .And.HaveStdOutContaining("Hello world");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
         [InlineData("net5.0")]
         public void PrepareForILLink_can_set_IsTrimmable(string targetFramework)
         {
@@ -178,6 +207,182 @@ namespace Microsoft.NET.Publish.Tests
             DoesImageHaveMethod(isTrimmableDll, "UnusedMethod").Should().BeFalse();
         }
 
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_analysis_warnings_are_disabled_by_default(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true")
+                .Should().Pass()
+                // trim analysis warnings are disabled
+                .And.NotHaveStdOutContaining("warning IL2075")
+                .And.NotHaveStdOutContaining("warning IL2026")
+                .And.NotHaveStdOutContaining("warning IL2043")
+                .And.NotHaveStdOutContaining("warning IL2046")
+                .And.NotHaveStdOutContaining("warning IL2093");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_accepts_option_to_enable_analysis_warnings(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false")
+                .Should().Pass()
+                .And.HaveStdOutMatching("warning IL2075.*Program.IL_2075")
+                .And.HaveStdOutMatching("warning IL2026.*Program.IL_2026.*Testing analysis warning IL2026")
+                .And.HaveStdOutMatching("warning IL2043.*Program.get_IL_2043")
+                .And.HaveStdOutMatching("warning IL2046.*Program.Derived.IL_2046")
+                .And.HaveStdOutMatching("warning IL2093.*Program.Derived.IL_2093");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_errors_fail_the_build(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            // Set up a project with an invalid feature substitution, just to produce an error.
+            var testProject = CreateTestProjectForILLinkTesting(targetFramework, projectName);
+            testProject.SourceFiles[$"{projectName}.xml"] = $@"
+<linker>
+  <assembly fullname=""{projectName}"">
+    <type fullname=""Program"" feature=""featuremissingvalue"" />
+  </assembly>
+</linker>
+";
+            var testAsset = _testAssetsManager.CreateTestProject(testProject)
+                .WithProjectChanges(project => AddRootDescriptor(project, $"{projectName}.xml"));
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false")
+                .Should().Fail()
+                .And.HaveStdOutContaining("error IL1001")
+                .And.HaveStdOutContaining(Strings.ILLinkFailed);
+
+            var intermediateDirectory = publishCommand.GetIntermediateDirectory(targetFramework: targetFramework, runtimeIdentifier: rid).FullName;
+            var publishDirectory = publishCommand.GetOutputDirectory(targetFramework: targetFramework, runtimeIdentifier: rid).FullName;
+
+            var linkSemaphore = Path.Combine(intermediateDirectory, "Link.semaphore");
+            var publishedDll = Path.Combine(publishDirectory, $"{projectName}.dll");
+
+            File.Exists(linkSemaphore).Should().BeFalse();
+            File.Exists(publishedDll).Should().BeFalse();
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_verify_analysis_warnings_hello_world_app(string targetFramework)
+        {
+            var projectName = "AnalysisWarningsOnHelloWorldApp";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+            List<string> expectedOutput = new List<string> () {
+                    "ILLink : Trim analysis warning IL2070: System.RuntimeType.GetMethodBase(RuntimeType,RuntimeMethodHandleInternal",
+                    "ILLink : Trim analysis warning IL2059: System.Reflection.RuntimeConstructorInfo.Invoke(Object,BindingFlags,Binder,Object[],CultureInfo",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.CustomAttribute.GetAttributeUsage(RuntimeType",
+                    "ILLink : Trim analysis warning IL2065: System.Reflection.CustomAttribute.AddCustomAttributes(ListBuilder`1&,RuntimeModule,Int32,RuntimeType,Boolean,RuntimeType.ListBuilder<Object>",
+                    "ILLink : Trim analysis warning IL2065: System.Reflection.CustomAttribute.AddCustomAttributes(ListBuilder`1&,RuntimeModule,Int32,RuntimeType,Boolean,RuntimeType.ListBuilder<Object>",
+                    "ILLink : Trim analysis warning IL2065: System.Reflection.CustomAttribute.AddCustomAttributes(ListBuilder`1&,RuntimeModule,Int32,RuntimeType,Boolean,RuntimeType.ListBuilder<Object>",
+                    "ILLink : Trim analysis warning IL2055: System.Reflection.Emit.TypeBuilderInstantiation.Substitute(Type[]",
+                    "ILLink : Trim analysis warning IL2070: System.Reflection.RuntimeAssembly.AddPublicNestedTypes(Type,List<Type>,List<Exception>",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.RuntimeModule.ResolveLiteralField(Int32,Type[],Type[]",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.RuntimeModule.ResolveLiteralField(Int32,Type[],Type[]",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.RuntimeModule.ResolveLiteralField(Int32,Type[],Type[]",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.RuntimeModule.GetMethodInternal(String,BindingFlags,Binder,CallingConventions,Type[],ParameterModifier[]",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.RuntimeModule.GetMethodInternal(String,BindingFlags,Binder,CallingConventions,Type[],ParameterModifier[]",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.CustomAttribute.FilterCustomAttributeRecord(MetadataToken,MetadataImport&,RuntimeModule,MetadataToken,RuntimeType,Boolean,ListBuilder`1&,RuntimeType&,IRuntimeMethodInfo&,Boolean&",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.CustomAttribute.FilterCustomAttributeRecord(MetadataToken,MetadataImport&,RuntimeModule,MetadataToken,RuntimeType,Boolean,ListBuilder`1&,RuntimeType&,IRuntimeMethodInfo&,Boolean&",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.CustomAttributeData.CustomAttributeData(RuntimeModule,MetadataToken,ConstArray&",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.CustomAttributeData.CustomAttributeData(RuntimeModule,MetadataToken,ConstArray&",
+                    "ILLink : Trim analysis warning IL2070: System.Diagnostics.Tracing.ManifestBuilder.GetTypeName(Type",
+                    "ILLink : Trim analysis warning IL2075: System.Diagnostics.Tracing.ManifestBuilder.CreateManifestString(",
+                    "ILLink : Trim analysis warning IL2070: System.Diagnostics.Tracing.TypeAnalysis.TypeAnalysis(Type,EventDataAttribute,List<Type>",
+                    "ILLink : Trim analysis warning IL2070: System.Diagnostics.Tracing.NullableTypeInfo.NullableTypeInfo(Type,List<Type>",
+                    "ILLink : Trim analysis warning IL2072: System.Diagnostics.Tracing.NullableTypeInfo.WriteData(PropertyValue",
+                    "ILLink : Trim analysis warning IL2077: System.Runtime.Serialization.Formatters.Binary.ObjectReader.ParseObject(ParseRecord",
+                    "ILLink : Trim analysis warning IL2075: System.Runtime.Serialization.ObjectManager.DoValueTypeFixup(FieldInfo,ObjectHolder,Object",
+                    "ILLink : Trim analysis warning IL2070: System.Runtime.Serialization.ObjectManager.GetDeserializationConstructor(Type",
+                    "ILLink : Trim analysis warning IL2057: System.Runtime.Serialization.Formatters.Binary.ObjectReader.GetSimplyNamedTypeFromAssembly(Assembly,String,Type&",
+                    "ILLink : Trim analysis warning IL2026: System.Runtime.Serialization.FormatterServices.GetTypeFromAssembly(Assembly,String",
+                    "ILLink : Trim analysis warning IL2055: System.Reflection.Emit.TypeBuilder.DefineDefaultConstructorNoLock(MethodAttributes",
+                    "ILLink : Trim analysis warning IL2055: System.Reflection.Emit.TypeBuilder.DefineDefaultConstructorNoLock(MethodAttributes",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.Emit.TypeBuilder.DefineDefaultConstructorNoLock(MethodAttributes",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.Emit.TypeBuilder.DefineDefaultConstructorNoLock(MethodAttributes",
+                    "ILLink : Trim analysis warning IL2026: System.Runtime.Serialization.Formatters.Binary.ObjectReader.TopLevelAssemblyTypeResolver.ResolveType(Assembly,String,Boolean",
+                    "ILLink : Trim analysis warning IL2075: System.Runtime.Serialization.FormatterServices.InternalGetSerializableMembers(Type",
+                    "ILLink : Trim analysis warning IL2055: System.Reflection.Emit.TypeBuilder.GetConstructor(Type,ConstructorInfo",
+                    "ILLink : Trim analysis warning IL2070: System.Runtime.Serialization.SerializationEvents.GetMethodsWithAttribute(Type,Type",
+                    "ILLink : Trim analysis warning IL2070: System.Runtime.Serialization.FormatterServices.GetSerializableFields(Type",
+                    "ILLink : Trim analysis warning IL2082: System.Reflection.Emit.TypeBuilder.DefineConstructorNoLock(MethodAttributes,CallingConventions,Type[],Type[][],Type[][]",
+                    "ILLink : Trim analysis warning IL2026: System.TypeNameParser.ResolveType(Assembly,String[],Func<Assembly,String,Boolean,Type>,Boolean,Boolean,StackCrawlMark&",
+                    "ILLink : Trim analysis warning IL2075: System.TypeNameParser.ResolveType(Assembly,String[],Func<Assembly,String,Boolean,Type>,Boolean,Boolean,StackCrawlMark&",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.Emit.ModuleBuilder.GetTypeNoLock(String,Boolean,Boolean",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.Emit.ModuleBuilder.GetTypeNoLock(String,Boolean,Boolean",
+                    "ILLink : Trim analysis warning IL2075: System.Reflection.CustomAttributeData.Init(Object",
+                    "ILLink : Trim analysis warning IL2055: System.Reflection.SignatureTypeExtensions.TryMakeGenericType(Type,Type[]",
+                    "ILLink : Trim analysis warning IL2075: System.Diagnostics.StackTrace.TryResolveStateMachineMethod(MethodBase&,Type&",
+                    "ILLink : Trim analysis warning IL2057: System.Resources.ResourceReader.FindType(Int32",
+                    "ILLink : Trim analysis warning IL2057: System.Resources.ManifestBasedResourceGroveler.CreateResourceSet(Stream,Assembly",
+                    "ILLink : Trim analysis warning IL2072: System.Resources.ManifestBasedResourceGroveler.CreateResourceSet(Stream,Assembly",
+                    "ILLink : Trim analysis warning IL2057: System.Resources.ManifestBasedResourceGroveler.CreateResourceSet(Stream,Assembly",
+                    "ILLink : Trim analysis warning IL2072: System.Resources.ManifestBasedResourceGroveler.CreateResourceSet(Stream,Assembly",
+                    "ILLink : Trim analysis warning IL2077: System.Resources.ResourceReader.InitializeBinaryFormatter(",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.Associates.AssignAssociates(Int32,RuntimeType,RuntimeType",
+                    "ILLink : Trim analysis warning IL2072: System.Diagnostics.Tracing.EventSource.EnsureDescriptorsInitialized(",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.Emit.ModuleBuilder.GetGenericMethodBaseDefinition(MethodBase",
+                    "ILLink : Trim analysis warning IL2026: System.Reflection.Emit.ModuleBuilder.GetGenericMethodBaseDefinition(MethodBase",
+                    "ILLink : Trim analysis warning IL2075: System.Attribute.GetParentDefinition(PropertyInfo,Type[]",
+                    "ILLink : Trim analysis warning IL2075: System.Attribute.GetParentDefinition(EventInfo",
+                    "ILLink : Trim analysis warning IL2080: System.Resources.ResourceReader.<>c.<InitializeBinaryFormatter>b__6_1(",
+                    "ILLink : Trim analysis warning IL2060: System.Resources.ResourceReader.<>c.<InitializeBinaryFormatter>b__6_1(",
+                    "ILLink : Trim analysis warning IL2075: System.Diagnostics.Tracing.EventSource.CreateManifestAndDescriptors(Type,String,EventSource,EventManifestOptions",
+                    "ILLink : Trim analysis warning IL2055: System.RuntimeTypeHandle.GetTypeHelper(Type,Type[],IntPtr,Int32"
+            };
+
+            var testProject = CreateTestProjectForILLinkTesting(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var result = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name)).Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false");
+
+            result.Should().Pass();
+            //This function doesn't use an XML file like the runtime
+            //to silence warnings since will make the test to fail only
+            //with new warnings, we want the test to fail if any 
+            //missing warnings also. It doesn't use BeEquivalentTo
+            //function that warns for any new or missing warnings
+            //since the error experience is not good for a developer
+            var warnings = result.StdOut.Split('\n','\r', ')').Where(line => line.StartsWith("ILLink :"));
+            var extraWarnings = warnings.Except(expectedOutput);
+            var missingWarnings = expectedOutput.Except(warnings);
+
+            string errorMessage = $"The execution of a hello world app generated a diff in the number of warnings the app produces{Environment.NewLine}{Environment.NewLine}";
+            if (missingWarnings.Any())
+            {
+                errorMessage += $"This is a list of missing linker warnings generated with your change using a console app, if you are working on make things linker" +
+                    $" friendly please also submit a PR deleting these warnings:{Environment.NewLine}";
+                foreach (var missingWarning in missingWarnings)
+                    errorMessage += "-  " + missingWarning + Environment.NewLine;
+            }
+            if (extraWarnings.Any()) { 
+                errorMessage += $"This is a list of extra linker warnings generated with your change using a console app:{Environment.NewLine}";
+                foreach (var extraWarning in extraWarnings)
+                    errorMessage += "+  " + extraWarning + Environment.NewLine;
+            }
+            Assert.True(!missingWarnings.Any() && !extraWarnings.Any(), errorMessage);
+        }
 
         [Theory]
         [InlineData("netcoreapp3.0")]
@@ -538,6 +743,112 @@ namespace Microsoft.NET.Publish.Tests
             publishPdbSize.Should().Be(linkedPdbSize);
         }
 
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_can_treat_warnings_as_errors(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false",
+                                    "/p:WarningsAsErrors=IL2075")
+                .Should().Fail()
+                .And.HaveStdOutContaining("error IL2075")
+                .And.HaveStdOutContaining("warning IL2026");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_can_treat_warnings_not_as_errors(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false",
+                                    "/p:TreatWarningsAsErrors=true", "/p:WarningsNotAsErrors=IL2075")
+                .Should().Fail()
+                .And.HaveStdOutContaining("error IL2026")
+                .And.HaveStdOutContaining("warning IL2075");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_can_ignore_warnings(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false",
+                                    "/p:NoWarn=IL2075", "/p:WarnAsError=IL2075")
+                .Should().Pass()
+                .And.NotHaveStdOutContaining("warning IL2075")
+                .And.NotHaveStdOutContaining("error IL2075")
+                .And.HaveStdOutContaining("warning IL2026");
+        }
+
+        [Theory]
+        [InlineData("net5.0")]
+        public void ILLink_respects_analysis_level(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false",
+                                    "/p:AnalysisLevel=0.0")
+                .Should().Pass()
+                .And.NotHaveStdOutMatching(@"warning IL\d\d\d\d");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_respects_warning_level_independently(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false",
+                                    "/p:ILLinkWarningLevel=0")
+                .Should().Pass()
+                .And.NotHaveStdOutContaining("warning IL2075");
+        }
+
+        [RequiresMSBuildVersionTheory("16.8.0")]
+        [InlineData("net5.0")]
+        public void ILLink_can_treat_warnings_as_errors_independently(string targetFramework)
+        {
+            var projectName = "AnalysisWarnings";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
+
+            var testProject = CreateTestProjectWithAnalysisWarnings(targetFramework, projectName);
+            var testAsset = _testAssetsManager.CreateTestProject(testProject);
+
+            var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
+            publishCommand.Execute($"/p:RuntimeIdentifier={rid}", $"/p:SelfContained=true", "/p:PublishTrimmed=true", "/p:SuppressTrimAnalysisWarnings=false",
+                                    "/p:TreatWarningsAsErrors=true", "/p:ILLinkTreatWarningsAsErrors=false")
+                .Should().Pass()
+                .And.HaveStdOutContaining("warning IL2075");
+        }
+
         [Theory]
         [InlineData("netcoreapp3.0")]
         public void ILLink_error_on_portable_app(string targetFramework)
@@ -551,7 +862,7 @@ namespace Microsoft.NET.Publish.Tests
             var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
             publishCommand.Execute("/p:PublishTrimmed=true")
                 .Should().Fail()
-                .And.HaveStdOutContainingIgnoreCase("NETSDK1102");
+                .And.HaveStdOutContaining(Strings.ILLinkNotSupportedError);
         }
 
         [Theory]
@@ -560,18 +871,19 @@ namespace Microsoft.NET.Publish.Tests
         {
             var projectName = "HelloWorld";
             var referenceProjectName = "ClassLibForILLink";
+            var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
 
             var testProject = CreateTestProjectForILLinkTesting(targetFramework, projectName, referenceProjectName);
             var testAsset = _testAssetsManager.CreateTestProject(testProject);
 
             var publishCommand = new PublishCommand(Log, Path.Combine(testAsset.TestRoot, testProject.Name));
-            publishCommand.Execute("/p:PublishTrimmed=true", $"/p:SelfContained=true", "/p:PublishTrimmed=true")
+            publishCommand.Execute("/p:PublishTrimmed=true", $"/p:RuntimeIdentifier={rid}", "/p:SelfContained=true", "/p:PublishTrimmed=true")
                 .Should().Pass().And.HaveStdOutContainingIgnoreCase("https://aka.ms/dotnet-illink");
         }
 
         [Fact(Skip = "https://github.com/aspnet/AspNetCore/issues/12064")]
         public void ILLink_and_crossgen_process_razor_assembly()
-        { 
+        {
             var targetFramework = "netcoreapp3.0";
             var rid = EnvironmentInfo.GetCompatibleRid(targetFramework);
 
@@ -794,6 +1106,70 @@ namespace Microsoft.NET.Publish.Tests
                                     new XAttribute("Trim", trim.ToString ()))));
         }
 
+        private TestProject CreateTestProjectWithAnalysisWarnings(string targetFramework, string projectName)
+        {
+            var testProject = new TestProject()
+            {
+                Name = projectName,
+                TargetFrameworks = targetFramework,
+                IsSdkProject = true,
+            };
+
+            testProject.SourceFiles[$"{projectName}.cs"] = @"
+using System;
+using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
+public class Program
+{
+    public static void Main()
+    {
+        IL_2075();
+        IL_2026();
+        _ = IL_2043;
+        new Derived().IL_2046();
+        new Derived().IL_2093();
+    }
+
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields)]
+    public static string typeName;
+
+    public static void IL_2075()
+    {
+        _ = Type.GetType(typeName).GetMethod(""SomeMethod"");
+    }
+
+    [RequiresUnreferencedCode(""Testing analysis warning IL2026"")]
+    public static void IL_2026()
+    {
+    }
+
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields)]
+    public static string IL_2043 {
+        [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields)]
+        get => null;
+    }
+
+    public class Base
+    {
+        [RequiresUnreferencedCode(""Testing analysis warning IL2046"")]
+        public virtual void IL_2046() {}
+
+        public virtual string IL_2093() => null;
+    }
+
+    public class Derived : Base
+    {
+        public override void IL_2046() {}
+
+        [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods)]
+        public override string IL_2093() => null;
+    }
+}
+";
+
+            return testProject;
+        }
+
         private TestProject CreateTestProjectForILLinkTesting(
             string targetFramework,
             string mainProjectName,
@@ -807,6 +1183,7 @@ namespace Microsoft.NET.Publish.Tests
                 Name = mainProjectName,
                 TargetFrameworks = targetFramework,
                 IsSdkProject = true,
+                IsExe = true
             };
 
             testProject.SourceFiles[$"{mainProjectName}.cs"] = @"
