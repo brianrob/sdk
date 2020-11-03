@@ -51,7 +51,10 @@ namespace Microsoft.DotNet.Tools.MSBuild
                 msbuildPath);
 
             // Add the performance log location to the environment of the target process.
-            EnvironmentVariable(PerformanceLogManager.PerfLogDirEnvVar, PerformanceLogManager.Instance.CurrentLogDirectory);
+            if (PerformanceLogManager.Instance != null && !string.IsNullOrEmpty(PerformanceLogManager.Instance.CurrentLogDirectory))
+            {
+                EnvironmentVariable(PerformanceLogManager.PerfLogDirEnvVar, PerformanceLogManager.Instance.CurrentLogDirectory);
+            }
         }
 
         public void EnvironmentVariable(string name, string value)

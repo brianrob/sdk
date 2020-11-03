@@ -24,7 +24,7 @@ namespace Microsoft.DotNet.Cli.Utils
             private set;
         }
 
-        internal static void Initialize(IFileSystem fileSystem)
+        internal static void InitializeAndStartCleanup(IFileSystem fileSystem)
         {
             if(Instance == null)
             {

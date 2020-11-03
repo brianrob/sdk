@@ -31,7 +31,7 @@ namespace Microsoft.DotNet.Cli
 
             LogMachineConfiguration();
             OSInfo(RuntimeEnvironment.OperatingSystem, RuntimeEnvironment.OperatingSystemVersion, RuntimeEnvironment.OperatingSystemPlatform.ToString());
-            SDKInfo(Product.Version, commitSha, GetDisplayRid(versionFile), AppContext.BaseDirectory);
+            SDKInfo(Product.Version, commitSha, RuntimeInformation.RuntimeIdentifier, versionFile.BuildRid, AppContext.BaseDirectory);
             EnvironmentInfo(Environment.CommandLine);
             LogMemoryConfiguration();
             LogDrives();
@@ -51,20 +51,6 @@ namespace Microsoft.DotNet.Cli
             }
         }
 
-        [NonEvent]
-        private static string GetDisplayRid(DotnetVersionFile versionFile)
-        {
-            FrameworkDependencyFile fxDepsFile = new FrameworkDependencyFile();
-
-            string currentRid = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier;
-
-            // if the current RID isn't supported by the shared framework, display the RID the CLI was
-            // built with instead, so the user knows which RID they should put in their "runtimes" section.
-            return fxDepsFile.IsRuntimeSupported(currentRid) ?
-                currentRid :
-                versionFile.BuildRid;
-        }
-
         [Event(1)]
         internal void OSInfo(string osname, string osversion, string osplatform)
         {
@@ -72,9 +58,9 @@ namespace Microsoft.DotNet.Cli
         }
 
         [Event(2)]
-        internal void SDKInfo(string version, string commit, string rid, string basePath)
+        internal void SDKInfo(string version, string commit, string currentRid, string buildRid, string basePath)
         {
-            WriteEvent(2, version, commit, rid, basePath);
+            WriteEvent(2, version, commit, currentRid, buildRid, basePath);
         }
 
         [Event(3)]
@@ -221,7 +207,8 @@ namespace Microsoft.DotNet.Cli
                 {
                     try
                     {
-                        DriveConfiguration(driveInfo.Name, driveInfo.DriveFormat, driveInfo.DriveType.ToString(), (double)driveInfo.TotalSize/1024/1024, (double)driveInfo.AvailableFreeSpace/1024/1024);
+                        DriveConfiguration(driveInfo.Name, driveInfo.DriveFormat, driveInfo.DriveType.ToString(),
+                            (double)driveInfo.TotalSize/1024/1024, (double)driveInfo.AvailableFreeSpace/1024/1024);
                     }
                     catch
                     {
@@ -255,7 +242,8 @@ namespace Microsoft.DotNet.Cli
 
                     if (Interop.GlobalMemoryStatusEx(ref memoryStatusEx))
                     {
-                        MemoryConfiguration((int)memoryStatusEx.dwMemoryLoad, (int)(memoryStatusEx.ullAvailPhys / 1024 / 1024), (int)(memoryStatusEx.ullTotalPhys / 1024 / 1024));
+                        MemoryConfiguration((int)memoryStatusEx.dwMemoryLoad, (int)(memoryStatusEx.ullAvailPhys / 1024 / 1024),
+                            (int)(memoryStatusEx.ullTotalPhys / 1024 / 1024));
                     }
                 }
                 else if(RuntimeInformation.IsOSPlatform(OSPlatform.Linux))

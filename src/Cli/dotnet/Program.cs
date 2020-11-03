@@ -33,16 +33,12 @@ namespace Microsoft.DotNet.Cli
             // Capture the current timestamp to calculate the host overhead.
             DateTime mainTimeStamp = DateTime.Now;
 
-            // Determine if the perf log is enabled.
             bool perfLogEnabled = Env.GetEnvironmentVariableAsBool("DOTNET_CLI_PERF_LOG", false);
             PerformanceLogStartupInformation startupInfo = null;
             if (perfLogEnabled)
             {
-                // Initialize the performance log start-up information.
                 startupInfo = new PerformanceLogStartupInformation(mainTimeStamp);
-
-                // Initialize the performance log manager and kick off asynchronous clean-up.
-                PerformanceLogManager.Initialize(FileSystemWrapper.Default);
+                PerformanceLogManager.InitializeAndStartCleanup(FileSystemWrapper.Default);
             }
 
             PerformanceLogEventListener perLogEventListener = null;
